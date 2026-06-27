@@ -278,12 +278,11 @@
 
   async function handle_add_components(params) {
     // If we don't have captured SCM/template, try to get it
-    if (!capturedScmJson || !capturedRpcTemplate) {
-      console.log('[MCP Bridge] No captured SCM, forcing save to capture...');
+    if (!capturedScmJson || !capturedRpcTemplate || !capturedSessionUuid) {
+      console.log('[MCP Bridge] No captured session, forcing save to capture...');
       const got = await getCurrentScm();
-      if (!got || !capturedScmJson || !capturedRpcTemplate) {
-        // Last resort: build from scratch
-        console.log('[MCP Bridge] Force capture failed, building RPC from scratch');
+      if (!got || !capturedScmJson || !capturedRpcTemplate || !capturedSessionUuid) {
+        return { success: false, error: 'Could not capture session params. Please interact with the designer (e.g. click a component property) to trigger a save, then retry.' };
       }
     }
 
@@ -293,8 +292,8 @@
       return { success: false, error: 'Could not extract GWT permutation hash from page scripts' };
     }
 
-    // Get or generate session UUID
-    const sessionUuid = capturedSessionUuid || generateUuid();
+    // Get or use captured session UUID — never generate a random one (causes InvalidSessionException)
+    const sessionUuid = capturedSessionUuid;
     // Get file path — MUST respect screenName param, not just use cached path
     const targetScreen = params.screenName || 'Screen1';
     let filePath = capturedFilePath;
@@ -1264,11 +1263,13 @@
 
     const data = event.data.data;
     if (data) {
-      if (data.sessionUuid) capturedSessionUuid = data.sessionUuid;
+      // Do NOT restore sessionUuid from cache — it changes every login and causes
+      // InvalidSessionException if reused. It will be captured fresh from the first save2 XHR.
       if (data.gwtHash) capturedGwtHash = data.gwtHash;
       if (data.filePath) capturedFilePath = data.filePath;
       if (data.base36) capturedBase36 = data.base36;
-      if (data.scmJson) capturedScmJson = data.scmJson;
+      // Do NOT restore scmJson from cache — it's always stale after a page reload.
+      // capturedScmJson will be populated by the passive XHR interceptor.
       if (data.rpcTemplate) capturedRpcTemplate = data.rpcTemplate;
       console.log('[MCP Bridge] Loaded cached session params:', {
         sessionUuid: !!capturedSessionUuid, gwtHash: !!capturedGwtHash,
@@ -1285,31 +1286,36 @@
   // Request cached params from content script
   window.postMessage({ type: BRIDGE_PREFIX + 'cache-read' }, '*');
 
-  // Auto-capture session params on load if not cached
-  // Wait for App Inventor to fully load, then force a save2 to capture params
-  function autoCapture() {
-    if (capturedScmJson && capturedRpcTemplate) {
-      console.log('[MCP Bridge] Session params already available, skipping auto-capture');
-      return;
-    }
-    // Check if App Inventor is ready
-    if (typeof BlocklyPanel_setComponentProperty !== 'function') {
-      // Not ready yet, retry
-      console.log('[MCP Bridge] App Inventor not ready, retrying auto-capture in 3s...');
-      setTimeout(autoCapture, 3000);
-      return;
-    }
-    console.log('[MCP Bridge] Auto-capturing session params...');
-    forceSave2Capture().then((success) => {
-      if (success) {
-        console.log('[MCP Bridge] Auto-capture successful');
-      } else {
-        console.log('[MCP Bridge] Auto-capture failed, will capture on first tool call');
+  // Passively intercept ALL save2 XHRs from App Inventor startup — no trigger needed.
+  // App Inventor naturally fires save2 during load ("Locking Screens" sequence).
+  (function installPassiveCapture() {
+    if (capturedScmJson) return; // already have fresh SCM
+    const origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function(body) {
+      if (!capturedScmJson && typeof body === 'string' && body.includes('save2')) {
+        const fields = body.split('|');
+        if (fields.length > 4) capturedGwtHash = fields[4];
+        const uuidMatch = body.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
+        if (uuidMatch) capturedSessionUuid = uuidMatch[1];
+        const pathMatch = body.match(/(src\/appinventor\/[^|]+\.scm)/);
+        if (pathMatch) capturedFilePath = pathMatch[1];
+        const base36Match = body.match(/\|8\|([A-Za-z0-9]+)\|9\|/);
+        if (base36Match) capturedBase36 = base36Match[1];
+        const scmMatch = body.match(/#\\!\n\$JSON\n([\s\S]*?)\n\\!#/);
+        if (scmMatch) {
+          try { capturedScmJson = JSON.parse(scmMatch[1]); } catch(e) {}
+        }
+        if (capturedScmJson) {
+          console.log('[MCP Bridge] Passive capture successful from startup save2:', {
+            hasScm: true, filePath: capturedFilePath, base36: capturedBase36
+          });
+          XMLHttpRequest.prototype.send = origSend; // restore after first capture
+        }
       }
-    });
-  }
-  // Start auto-capture after a delay to let App Inventor initialize
-  setTimeout(autoCapture, 4000);
+      return origSend.apply(this, arguments);
+    };
+    console.log('[MCP Bridge] Passive XHR capture installed');
+  })();
 
   // Expose tool dispatch globally so background can call via executeScript
   window.__mcpBridge = async function(tool, params) {

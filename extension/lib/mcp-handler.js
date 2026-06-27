@@ -74,7 +74,7 @@ export const TOOL_DEFINITIONS = [
               type: { type: 'string' },
               name: { type: 'string' },
               properties: { type: 'object' },
-              children: { type: 'array' }
+              children: { type: 'array', items: { type: 'object' } }
             },
             required: ['type', 'name']
           }
@@ -115,7 +115,7 @@ export const TOOL_DEFINITIONS = [
       type: 'object',
       properties: {
         xml: { type: 'string' },
-        blocks: { type: 'array' }
+        blocks: { type: 'array', items: { type: 'object' } }
       },
       required: []
     }

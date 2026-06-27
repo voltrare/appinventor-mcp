@@ -47,13 +47,20 @@ export async function handle_get_component_tree(params, pageApi) {
 export async function handle_add_components(params, pageApi) {
   try {
     const screenName = params.screenName || 'Screen1';
+    const mode = params.mode || 'merge';
 
     // Read current tree
     const scmJson = pageApi.call('getComponentTree', { screenName });
     const existingScm = JSON.parse(scmJson);
 
-    // Merge new components
-    const merged = mergeComponents(existingScm, params.components);
+    // Replace or merge components based on mode
+    let merged;
+    if (mode === 'replace') {
+      existingScm.Properties.$Components = [];
+      merged = mergeComponents(existingScm, params.components);
+    } else {
+      merged = mergeComponents(existingScm, params.components);
+    }
 
     // Get session params for save2
     const sessionParams = pageApi.call('getSessionParams');
